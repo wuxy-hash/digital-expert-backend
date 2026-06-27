@@ -18,43 +18,39 @@ class WeComMessageHandler:
         return self.crypto.verify_url(msg_signature, timestamp, nonce, echostr)
 
     def handle_message(self, msg_signature: str, timestamp: str, nonce: str, raw_body: bytes) -> Dict[str, Any]:
-        """
-        处理用户消息
-        返回: {"type": "text", "content": "回复内容"}
-        """
-        # 1. 解析 XML，提取 Encrypt
-        root = ET.fromstring(raw_body)
-        encrypt = root.find("Encrypt").text
+        try:
+            # 解密消息
+            root = ET.fromstring(raw_body)
+            encrypt = root.find("Encrypt").text
+            decrypted = self.crypto.decrypt_message(msg_signature, timestamp, nonce, encrypt)
+            msg_root = ET.fromstring(decrypted)
+            msg_type = msg_root.find("MsgType").text
 
-        # 2. 解密消息
-        decrypted = self.crypto.decrypt_message(msg_signature, timestamp, nonce, encrypt)
+            if msg_type != "text":
+                return {"type": "text", "content": "目前仅支持文本消息，请发送文字提问。"}
 
-        # 3. 解析 XML 获取用户消息内容
-        msg_root = ET.fromstring(decrypted)
-        msg_type = msg_root.find("MsgType").text
+            user_query = msg_root.find("Content").text
+            user_query = self._clean_mention(user_query)
 
-        if msg_type != "text":
-            return {"type": "text", "content": "目前仅支持文本消息，请发送文字提问。"}
+            if not user_query or not user_query.strip():
+                return {"type": "text", "content": "请发送具体的问题，我会为您解答。"}
 
-        # 提取用户问题
-        user_query = msg_root.find("Content").text
-        # 去除 @机器人 的提及（如果有）
-        user_query = self._clean_mention(user_query)
+            # 调用 ChatService
+            reply_parts = []
+            for chunk in self.chat_service.chat(user_query.strip()):
+                reply_parts.append(chunk)
 
-        if not user_query or not user_query.strip():
-            return {"type": "text", "content": "请发送具体的问题，我会为您解答。"}
+            reply_content = "".join(reply_parts)
+            return {"type": "text", "content": reply_content or "抱歉，无法生成回复。"}
 
-        # 4. 调用 ChatService 生成回复
-        reply_parts = []
-        for chunk in self.chat_service.chat(user_query.strip()):
-            reply_parts.append(chunk)
-
-        reply_content = "".join(reply_parts)
-
-        if not reply_content:
-            reply_content = "抱歉，我暂时无法回答这个问题，请稍后再试。"
-
-        return {"type": "text", "content": reply_content}
+        except Exception as e:
+            import traceback
+            print("=" * 60)
+            print(f"处理消息时发生异常: {e}")
+            traceback.print_exc()
+            print("=" * 60)
+            # 返回友好的错误消息
+            return {"type": "text", "content": f"处理请求时发生错误，请稍后重试。"}
 
     def _clean_mention(self, text: str) -> str:
         """去除 @机器人 的提及"""

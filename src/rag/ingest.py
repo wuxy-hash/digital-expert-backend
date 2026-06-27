@@ -8,6 +8,14 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
 
+_shared_embedding_model = None
+
+def _get_shared_embedding_model(model_name="BAAI/bge-base-zh-v1.5"):
+    global _shared_embedding_model
+    if _shared_embedding_model is None:
+        print(f"首次加载 Embedding 模型（ingestor）: {model_name}")
+        _shared_embedding_model = SentenceTransformer(model_name)
+    return _shared_embedding_model
 
 class DocumentIngestor:
     def __init__(
@@ -19,7 +27,8 @@ class DocumentIngestor:
         chunk_overlap: int = 50
     ):
         self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
-        self.embedding_model = SentenceTransformer(embedding_model_name)
+        #self.embedding_model = SentenceTransformer(embedding_model_name)
+        self.embedding_model = _get_shared_embedding_model(embedding_model_name)
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
