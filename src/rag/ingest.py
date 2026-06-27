@@ -25,7 +25,7 @@ class DocumentIngestor:
         :param chunk_size: 文本切片大小
         :param chunk_overlap: 切片重叠大小
         """
-        self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port, check_version=False)
+        self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
         self.embedding_model = SentenceTransformer(embedding_model_name)
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
