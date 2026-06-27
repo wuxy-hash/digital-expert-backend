@@ -1,4 +1,5 @@
 # src/agents/agents.py
+from typing import Dict, Any, Optional
 from src.agents.base import BaseAgent
 from src.agents.prompts import (
     PROJECT_MANAGEMENT_PROMPT,
@@ -101,7 +102,6 @@ class BusinessExpertAgent(BaseAgent):
 
 
 class SystemMaintenanceAgent(BaseAgent):
-    """系统运维专家"""
     def __init__(self):
         super().__init__(
             name="系统运维专家",
