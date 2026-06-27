@@ -1,5 +1,4 @@
-cd /opt/digital-expert
-cat > src/knowledge/sync_cos.py << 'EOF'
+
 # src/knowledge/sync_cos.py
 import os
 import tempfile
@@ -192,4 +191,3 @@ def sync_knowledge_from_cos():
     # ---------- 8. 保存索引 ----------
     save_index(index)
     print(f"✅ 同步完成，当前索引中有 {len(index)} 个文件记录")
-EOF
