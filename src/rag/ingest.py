@@ -1,7 +1,12 @@
 # src/rag/ingest.py
+<<<<<<< HEAD
 import os
 import hashlib
 from typing import List, Optional
+=======
+import uuid
+from typing import List
+>>>>>>> 2850519134f6b3f2814f08f77778f37b47279a92
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
@@ -25,6 +30,7 @@ class DocumentIngestor:
             chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", "。", "；", "，", " ", ""]
         )
+<<<<<<< HEAD
         self._ensure_collections()
 
     def _ensure_collections(self):
@@ -36,12 +42,21 @@ class DocumentIngestor:
             "business"
         ]
         for col in collections:
+=======
+
+    def _ensure_collection(self, collection_name: str):
+        """确保集合存在，不存在则创建"""
+        # 获取所有集合
+        collections = self.qdrant_client.get_collections().collections
+        existing = [c.name for c in collections]
+        if collection_name not in existing:
+>>>>>>> 2850519134f6b3f2814f08f77778f37b47279a92
             try:
                 self.qdrant_client.create_collection(
-                    collection_name=col,
+                    collection_name=collection_name,
                     vectors_config=VectorParams(size=768, distance=Distance.COSINE)
                 )
-                print(f"集合 {col} 创建成功")
+                print(f"✅ 集合 {collection_name} 创建成功")
             except Exception as e:
                 if "already exists" in str(e).lower():
                     pass
@@ -61,6 +76,12 @@ class DocumentIngestor:
         file_id: str,
         file_name: str
     ) -> int:
+<<<<<<< HEAD
+=======
+        # 确保集合存在
+        self._ensure_collection(collection)
+
+>>>>>>> 2850519134f6b3f2814f08f77778f37b47279a92
         if not texts:
             return 0
 
@@ -81,7 +102,11 @@ class DocumentIngestor:
 
         points = []
         for idx, (chunk, vector) in enumerate(zip(all_chunks, vectors)):
+<<<<<<< HEAD
             point_id = self._generate_point_id(file_id, idx)
+=======
+            point_id = str(uuid.uuid4())
+>>>>>>> 2850519134f6b3f2814f08f77778f37b47279a92
             points.append(
                 PointStruct(
                     id=point_id,
@@ -102,6 +127,10 @@ class DocumentIngestor:
         return len(points)
 
     def delete_by_file_id(self, collection: str, file_id: str):
+<<<<<<< HEAD
+=======
+        self._ensure_collection(collection)
+>>>>>>> 2850519134f6b3f2814f08f77778f37b47279a92
         self.qdrant_client.delete(
             collection_name=collection,
             points_selector={

@@ -1,4 +1,3 @@
-
 # src/knowledge/sync_cos.py
 import os
 import tempfile
@@ -9,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 from src.utils.cos_api import CosAPI
 from src.rag.ingest import DocumentIngestor
@@ -65,7 +65,6 @@ def sync_knowledge_from_cos():
     valid_folders = []
     for f in all_folders:
         raw_name = f.rstrip("/")
-        # 去掉前缀
         if COS_KNOWLEDGE_BASE_PREFIX and raw_name.startswith(COS_KNOWLEDGE_BASE_PREFIX):
             folder_name = raw_name[len(COS_KNOWLEDGE_BASE_PREFIX):]
         else:
@@ -140,11 +139,9 @@ def sync_knowledge_from_cos():
             if key in modified_files:
                 qdrant_client.delete(
                     collection_name=meta["collection"],
-                    points_selector={
-                        "filter": {
-                            "must": [{"key": "file_id", "match": {"value": key}}]
-                        }
-                    }
+                    points_selector=Filter(
+                        must=[FieldCondition(key="file_id", match=MatchValue(value=key))]
+                    )
                 )
                 print(f"    已删除旧向量")
             
@@ -177,11 +174,9 @@ def sync_knowledge_from_cos():
         try:
             qdrant_client.delete(
                 collection_name=meta["collection"],
-                points_selector={
-                    "filter": {
-                        "must": [{"key": "file_id", "match": {"value": key}}]
-                    }
-                }
+                points_selector=Filter(
+                    must=[FieldCondition(key="file_id", match=MatchValue(value=key))]
+                )
             )
             del index[key]
             print(f"    ✅ 已从向量库和索引中删除")

@@ -15,6 +15,8 @@ FOLDER_TO_COLLECTION = {
     "03-开发交付": "dev_delivery",
     "04-产品设计": "product_design",
     "05-业务知识": "business",
+    "06-系统运维": "system_mgmt",
+    "07-其他": "other",
 }
 
 # 反向映射（用于调试）
