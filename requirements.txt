@@ -31,3 +31,6 @@ python-multipart==0.0.20
 
 # ===== 企业微信消息加解密 (备用) =====
 pycryptodome==3.21.0
+
+# 对象存储
+cos-python-sdk-v5==1.9.37
