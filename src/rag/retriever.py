@@ -3,7 +3,6 @@ import os
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
-# 全局单例：只在首次调用时加载
 _embedding_model = None
 _qdrant_client = None
 
@@ -38,20 +37,31 @@ def retrieve_context(
 
     query_vector = model.encode(query).tolist()
 
-    results = client.search(
-        collection_name=collection,
-        query_vector=query_vector,
-        limit=top_k,
-        with_payload=True
-    )
+    # 兼容不同版本的 API
+    try:
+        # 新版本 1.18+ 使用 query_points
+        results = client.query_points(
+            collection_name=collection,
+            query=query_vector,
+            limit=top_k,
+            with_payload=True
+        ).points
+    except AttributeError:
+        # 旧版本 1.13 使用 search
+        results = client.search(
+            collection_name=collection,
+            query_vector=query_vector,
+            limit=top_k,
+            with_payload=True
+        )
 
     if not results:
         return ""
 
     context_parts = []
-    for i, hit in enumerate(results, 1):
+    for hit in results:
         text = hit.payload.get("text", "")
         if text:
-            context_parts.append(f"[文档片段 {i}] {text}")
+            context_parts.append(f"[文档片段] {text}")
 
     return "\n\n".join(context_parts) if context_parts else ""
