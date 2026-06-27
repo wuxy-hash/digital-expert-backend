@@ -80,22 +80,30 @@ class WeComMessageHandler:
         return cleaned.strip()
 
     def build_reply_xml(self, to_user: str, from_user: str, content: str, timestamp: str, nonce: str) -> str:
+    """构造加密回复 XML"""
         import time
-        reply_xml = f"""
-        <xml>
+        
+        # 1. 构造明文回复 XML（企业微信要求的格式）
+        reply_xml = f"""<xml>
             <ToUserName><![CDATA[{to_user}]]></ToUserName>
             <FromUserName><![CDATA[{from_user}]]></FromUserName>
             <CreateTime>{int(time.time())}</CreateTime>
             <MsgType><![CDATA[text]]></MsgType>
             <Content><![CDATA[{content}]]></Content>
-        </xml>
-        """.strip()
+            </xml>"""
+        
+        # 2. 加密
         encrypt, msg_signature = self.crypto.encrypt_message(reply_xml, timestamp, nonce)
-        return f"""
-        <xml>
-            <Encrypt><![CDATA[{encrypt}]]></Encrypt>
-            <MsgSignature><![CDATA[{msg_signature}]]></MsgSignature>
-            <TimeStamp>{timestamp}</TimeStamp>
-            <Nonce><![CDATA[{nonce}]]></Nonce>
-        </xml>
-        """.strip()
+        
+        # 3. 构造最终加密响应 XML
+        response_xml = f"""<xml>
+        <Encrypt><![CDATA[{encrypt}]]></Encrypt>
+        <MsgSignature><![CDATA[{msg_signature}]]></MsgSignature>
+        <TimeStamp>{timestamp}</TimeStamp>
+        <Nonce><![CDATA[{nonce}]]></Nonce>
+        </xml>"""
+        
+        # 调试：打印回复 XML 的前 200 字符
+        print(f"回复 XML 预览: {response_xml[:200]}...")
+        
+        return response_xml

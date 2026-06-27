@@ -77,6 +77,17 @@ async def wecom_callback(
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/test/reply")
+async def test_reply():
+    """测试回复格式是否正确"""
+    test_content = "这是一个测试回复"
+    from_user = "test_user"
+    to_user = "test_bot"
+    timestamp = str(int(time.time()))
+    nonce = "test_nonce"
+    
+    reply_xml = handler.build_reply_xml(to_user, from_user, test_content, timestamp, nonce)
+    return Response(content=reply_xml, media_type="application/xml")
 
 @app.get("/health")
 async def health():
