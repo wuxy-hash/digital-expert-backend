@@ -1,6 +1,6 @@
 # src/rag/ingest.py
-import os
-from typing import List, Optional
+import uuid
+from typing import List
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
@@ -17,14 +17,6 @@ class DocumentIngestor:
         chunk_size: int = 500,
         chunk_overlap: int = 50
     ):
-        """
-        初始化入库引擎
-        :param qdrant_host: Qdrant 服务地址
-        :param qdrant_port: Qdrant 服务端口
-        :param embedding_model_name: 中文 Embedding 模型名称
-        :param chunk_size: 文本切片大小
-        :param chunk_overlap: 切片重叠大小
-        """
         self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
         self.embedding_model = SentenceTransformer(embedding_model_name)
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -32,28 +24,22 @@ class DocumentIngestor:
             chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", "。", "；", "，", " ", ""]
         )
-        # 确保必要的集合存在
-        self._ensure_collections()
 
-    def _ensure_collections(self):
-        """确保五个领域的集合已创建"""
-        collections = [
-            "project_mgmt",
-            "procurement",
-            "dev_delivery",
-            "product_design",
-            "business"
-        ]
-        for col in collections:
+    def _ensure_collection(self, collection_name: str):
+        """确保集合存在，不存在则创建"""
+        # 获取所有集合
+        collections = self.qdrant_client.get_collections().collections
+        existing = [c.name for c in collections]
+        if collection_name not in existing:
             try:
                 self.qdrant_client.create_collection(
-                    collection_name=col,
+                    collection_name=collection_name,
                     vectors_config=VectorParams(size=768, distance=Distance.COSINE)
                 )
-                print(f"集合 {col} 创建成功")
+                print(f"✅ 集合 {collection_name} 创建成功")
             except Exception as e:
                 if "already exists" in str(e).lower():
-                    pass  # 已存在，忽略
+                    pass
                 else:
                     raise e
 
@@ -64,22 +50,15 @@ class DocumentIngestor:
         file_id: str,
         file_name: str
     ) -> int:
-        """
-        将文本列表（通常是一个文档拆分的多个片段）入库
-        :param texts: 文本列表（每个元素是一段文本）
-        :param collection: Qdrant 集合名称
-        :param file_id: 文件唯一标识（通常是 COS 路径或 file_id）
-        :param file_name: 文件名
-        :return: 插入的向量数量
-        """
+        # 确保集合存在
+        self._ensure_collection(collection)
+
         if not texts:
             return 0
 
-        # 如果 texts 是单个字符串，转为列表
         if isinstance(texts, str):
             texts = [texts]
 
-        # 对每一段文本进行二次切片（langchain 的 split_text 可以处理列表）
         all_chunks = []
         for t in texts:
             if t.strip():
@@ -90,13 +69,11 @@ class DocumentIngestor:
             print(f"文件 {file_name} 切分后无有效内容")
             return 0
 
-        # 生成向量
         vectors = self.embedding_model.encode(all_chunks)
 
-        # 构建 Points
         points = []
         for idx, (chunk, vector) in enumerate(zip(all_chunks, vectors)):
-            point_id = f"{file_id}_{idx}"
+            point_id = str(uuid.uuid4())
             points.append(
                 PointStruct(
                     id=point_id,
@@ -110,7 +87,6 @@ class DocumentIngestor:
                 )
             )
 
-        # 插入 Qdrant
         self.qdrant_client.upsert(
             collection_name=collection,
             points=points
@@ -118,7 +94,7 @@ class DocumentIngestor:
         return len(points)
 
     def delete_by_file_id(self, collection: str, file_id: str):
-        """删除指定文件的所有向量"""
+        self._ensure_collection(collection)
         self.qdrant_client.delete(
             collection_name=collection,
             points_selector={
