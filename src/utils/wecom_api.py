@@ -101,3 +101,30 @@ class WeComAPI:
         if resp.get("errcode") != 0:
             raise Exception(f"获取空间信息失败: {resp}")
         return resp.get("space_info", {})
+
+    def add_space_acl(self, spaceid: str, departmentid: int, auth: int = 1) -> dict:
+    """
+    给空间添加部门权限
+    官方文档: https://developer.work.weixin.qq.com/document/path/93656
+    auth: 1=仅下载, 4=仅预览, 5=可上传下载, 7=应用空间管理员(仅限个人)
+    """
+    token = self._get_access_token()
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/wedrive/space_acl_add"
+    payload = {
+        "spaceid": spaceid,
+        "auth_info": [{
+            "type": 2,           # 2 表示部门
+            "departmentid": departmentid,
+            "auth": auth
+        }]
+    }
+    headers = {"Content-Type": "application/json"}
+    resp = requests.post(
+        f"{url}?access_token={token}",
+        json=payload,
+        headers=headers,
+        timeout=10
+    ).json()
+    if resp.get("errcode") != 0:
+        raise Exception(f"添加部门权限失败: {resp}")
+    return resp
