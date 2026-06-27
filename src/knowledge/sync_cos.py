@@ -1,6 +1,7 @@
+cd /opt/digital-expert
+cat > src/knowledge/sync_cos.py << 'EOF'
 # src/knowledge/sync_cos.py
 import os
-import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
@@ -34,11 +35,8 @@ def sync_knowledge_from_cos():
     if not all([secret_id, secret_key, bucket]):
         raise Exception("COS 配置不完整，请检查 .env 文件")
 
-    # Qdrant 配置
     qdrant_host = os.getenv("QDRANT_HOST", "localhost")
     qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
-    
-    # 是否使用内网（服务器在腾讯云时建议开启）
     use_internal = os.getenv("COS_USE_INTERNAL", "true").lower() == "true"
     
     # ---------- 2. 初始化客户端 ----------
@@ -61,19 +59,34 @@ def sync_knowledge_from_cos():
     print(f"📂 当前索引中有 {len(index)} 个文件记录")
     
     # ---------- 4. 列举 COS 中的所有知识库文件 ----------
-    # 获取知识库根目录下的所有子目录
     all_folders = cos.list_folders(COS_KNOWLEDGE_BASE_PREFIX)
     print(f"📁 找到 {len(all_folders)} 个子目录")
     
-    # 只处理配置中定义的目录
-    valid_folders = [f for f in all_folders if f.rstrip("/") in FOLDER_TO_COLLECTION]
+    # 只处理配置中定义的目录，匹配纯目录名（去掉前缀）
+    valid_folders = []
+    for f in all_folders:
+        raw_name = f.rstrip("/")
+        # 去掉前缀
+        if COS_KNOWLEDGE_BASE_PREFIX and raw_name.startswith(COS_KNOWLEDGE_BASE_PREFIX):
+            folder_name = raw_name[len(COS_KNOWLEDGE_BASE_PREFIX):]
+        else:
+            folder_name = raw_name
+        if folder_name in FOLDER_TO_COLLECTION:
+            valid_folders.append(f)
+        else:
+            print(f"⚠️ 跳过未映射目录: {f} (纯名称: {folder_name})")
+    
+    print(f"有效子目录: {valid_folders}")
     
     # 收集 COS 中的所有文件
-    cos_files = {}  # key: 文件路径, value: {size, last_modified, etag, folder, collection}
-    
+    cos_files = {}
     for folder_prefix in valid_folders:
         folder_name = folder_prefix.rstrip("/")
-        collection = FOLDER_TO_COLLECTION.get(folder_name)
+        if COS_KNOWLEDGE_BASE_PREFIX and folder_name.startswith(COS_KNOWLEDGE_BASE_PREFIX):
+            pure_name = folder_name[len(COS_KNOWLEDGE_BASE_PREFIX):]
+        else:
+            pure_name = folder_name
+        collection = FOLDER_TO_COLLECTION.get(pure_name)
         if not collection:
             continue
             
@@ -84,7 +97,7 @@ def sync_knowledge_from_cos():
                 "size": obj["Size"],
                 "last_modified": obj["LastModified"],
                 "etag": obj["ETag"].strip('"'),
-                "folder_name": folder_name,
+                "folder_name": pure_name,
                 "collection": collection,
             }
     
@@ -99,7 +112,6 @@ def sync_knowledge_from_cos():
     for key in current_keys & indexed_keys:
         cos_meta = cos_files[key]
         index_meta = index[key]
-        # 使用 ETag 或 last_modified 判断是否变更
         if cos_meta["etag"] != index_meta.get("etag"):
             modified_files.add(key)
     deleted_files = indexed_keys - current_keys
@@ -113,16 +125,12 @@ def sync_knowledge_from_cos():
         print(f"  {action}: {key}")
         
         try:
-            # 下载文件内容
             content_bytes = cos.get_object(key)
-            
-            # 保存到临时文件进行解析
             file_ext = Path(key).suffix
             with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
                 tmp.write(content_bytes)
                 tmp_path = tmp.name
             
-            # 解析文件内容
             content = parse_file(tmp_path)
             os.unlink(tmp_path)
             
@@ -130,7 +138,6 @@ def sync_knowledge_from_cos():
                 print(f"    ⚠️ 文件内容为空或过短，跳过")
                 continue
             
-            # 如果是修改，先删除旧向量
             if key in modified_files:
                 qdrant_client.delete(
                     collection_name=meta["collection"],
@@ -142,7 +149,6 @@ def sync_knowledge_from_cos():
                 )
                 print(f"    已删除旧向量")
             
-            # 切片并入库
             count = ingestor.ingest_texts(
                 texts=[content],
                 collection=meta["collection"],
@@ -150,7 +156,6 @@ def sync_knowledge_from_cos():
                 file_name=Path(key).name
             )
             
-            # 更新索引
             index[key] = {
                 "file_name": Path(key).name,
                 "folder_name": meta["folder_name"],
@@ -187,3 +192,4 @@ def sync_knowledge_from_cos():
     # ---------- 8. 保存索引 ----------
     save_index(index)
     print(f"✅ 同步完成，当前索引中有 {len(index)} 个文件记录")
+EOF
