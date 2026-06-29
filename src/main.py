@@ -102,26 +102,57 @@ async def health():
 async def get_answer(answer_id: str):
     content = answer_store.get(answer_id, "内容已过期或不存在（链接有效期为内存存活时间）")
     
-    # ========== 调试：打印原始内容 ==========
-    print(f"原始内容: {content[:200]}...")
-    
-    # 1. 【关键】先替换 [来源：...] 格式（在 html.escape 之前）
+    # 1. 构建文档名映射（精确匹配 + 去扩展名匹配）
     from src.knowledge.index import load_index
     index = load_index()
-    doc_name_to_key = {}
-    for key, meta in index.items():
-        doc_name_to_key[meta.get("file_name", "")] = key
     
-    # 打印索引中的文档名，用于调试
-    print(f"索引中文档名: {list(doc_name_to_key.keys())[:10]}")
+    # 精确映射：文档名 → COS Key
+    doc_name_to_key = {}
+    # 去扩展名映射：文档名（不含扩展名）→ COS Key（取第一个匹配）
+    doc_name_no_ext_to_key = {}
+    
+    for key, meta in index.items():
+        file_name = meta.get("file_name", "")
+        if file_name:
+            doc_name_to_key[file_name] = key
+            # 去掉扩展名（最后一个点之后的部分）
+            if '.' in file_name:
+                base_name = file_name.rsplit('.', 1)[0]
+                # 如果多个文件同名（不同扩展名），保留第一个
+                if base_name not in doc_name_no_ext_to_key:
+                    doc_name_no_ext_to_key[base_name] = key
+    
+    print(f"索引中共有 {len(doc_name_to_key)} 个文档")
+    print(f"去扩展名映射共 {len(doc_name_no_ext_to_key)} 个文档")
     
     def replace_source(match):
         doc_name = match.group(1).strip()
         print(f"✅ 匹配到来源: {doc_name}")
+        
+        # 1. 先尝试精确匹配
         cos_key = doc_name_to_key.get(doc_name)
         if cos_key:
+            print(f"  精确匹配成功: {doc_name} → {cos_key}")
+        else:
+            # 2. 精确匹配失败，尝试去掉末尾可能存在的多余字符（如空格、.pdf等）
+            # 但主要策略：尝试去掉扩展名匹配
+            base_name = doc_name.rsplit('.', 1)[0] if '.' in doc_name else doc_name
+            cos_key = doc_name_no_ext_to_key.get(base_name)
+            if cos_key:
+                print(f"  去扩展名匹配成功: {base_name} → {cos_key}")
+            else:
+                # 3. 额外尝试：去掉结尾的 .pdf、.docx 等（如果用户手动输入）
+                # 实际上 DeepSeek 返回的没有扩展名，所以这个分支可能用不到
+                for ext in ['.pdf', '.docx', '.xlsx', '.pptx', '.txt']:
+                    if doc_name.endswith(ext):
+                        alt_name = doc_name[:-len(ext)]
+                        cos_key = doc_name_no_ext_to_key.get(alt_name)
+                        if cos_key:
+                            print(f"  去除后缀匹配成功: {alt_name} → {cos_key}")
+                            break
+        
+        if cos_key:
             try:
-                # 使用 inline 预览模式
                 presigned_url = cos.get_presigned_url(
                     cos_key,
                     expires=3600,
@@ -130,27 +161,24 @@ async def get_answer(answer_id: str):
                 return f'<a href="{presigned_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
             except Exception as e:
                 print(f"生成预签名 URL 失败: {e}")
-                return match.group(0)  # 保持原样
+                return match.group(0)
         else:
             print(f"⚠️ 未找到文档: {doc_name}")
-            return match.group(0)  # 保持原样
+            return match.group(0)
     
-    # 使用中文冒号（注意：文本中使用的是中文冒号）
+    # 使用中文冒号（文本中使用的是中文冒号）
     source_pattern = r'\[来源：([^\]]+)\]'
     content = re.sub(source_pattern, replace_source, content)
-    print(f"替换后内容预览: {content[:200]}...")
     
-    # 2. 再转义 HTML 特殊字符（防止 XSS）
+    # 2. 转义 HTML
     escaped = html.escape(content)
-    
-    # 3. 处理换行
     escaped = escaped.replace("\n", "<br>")
     
-    # 4. 处理标准 Markdown 风格链接 [文本](url)
+    # 3. 处理标准 Markdown 链接
     link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
     escaped = re.sub(link_pattern, r'<a href="\2" target="_blank" style="color: #1a73e8; text-decoration: underline;">\1</a>', escaped)
     
-    # 5. 构建 HTML 页面
+    # 4. HTML 模板（与之前相同）
     html_page = f"""
 <!DOCTYPE html>
 <html>
