@@ -14,20 +14,12 @@ class CosAPI:
         bucket: str,
         use_internal: bool = True
     ):
-        """
-        初始化腾讯云 COS 客户端
-        :param secret_id: 腾讯云 API 密钥 ID
-        :param secret_key: 腾讯云 API 密钥 Key
-        :param region: 存储桶地域（如 ap-guangzhou）
-        :param bucket: 存储桶名称（格式: bucket-appid）
-        :param use_internal: 是否使用内网访问（服务器在腾讯云时建议开启）
-        """
+        self.secret_id = secret_id
+        self.secret_key = secret_key
         self.bucket = bucket
         self.region = region
 
-        # 内网访问域名后缀
         endpoint = f"cos-internal.{region}.tencentcos.cn" if use_internal else None
-
         config = CosConfig(
             Secret_id=secret_id,
             Secret_key=secret_key,
@@ -38,12 +30,6 @@ class CosAPI:
         self.client = CosS3Client(config)
 
     def list_objects(self, prefix: str = "", delimiter: str = "/") -> List[Dict]:
-        """
-        列举存储桶中的对象（文件）
-        :param prefix: 前缀（相当于目录路径）
-        :param delimiter: 分隔符，"/" 表示只列举当前目录下的内容
-        :return: 文件列表，每个文件包含 key, size, last_modified, etag
-        """
         try:
             response = self.client.list_objects(
                 Bucket=self.bucket,
@@ -52,18 +38,12 @@ class CosAPI:
                 MaxKeys=1000
             )
             contents = response.get("Contents", [])
-            # 过滤掉目录占位对象（以 / 结尾的）
             return [obj for obj in contents if not obj["Key"].endswith("/")]
         except Exception as e:
             print(f"列举对象失败: {e}")
             return []
 
     def list_folders(self, prefix: str = "") -> List[str]:
-        """
-        列举存储桶中的子目录（前缀）
-        :param prefix: 父目录前缀
-        :return: 子目录名称列表
-        """
         try:
             response = self.client.list_objects(
                 Bucket=self.bucket,
@@ -78,11 +58,6 @@ class CosAPI:
             return []
 
     def get_object(self, key: str) -> bytes:
-        """
-        下载文件内容
-        :param key: 文件在 COS 中的完整路径
-        :return: 文件内容的字节流
-        """
         try:
             response = self.client.get_object(
                 Bucket=self.bucket,
@@ -94,11 +69,6 @@ class CosAPI:
             raise
 
     def get_object_metadata(self, key: str) -> Dict:
-        """
-        获取文件的元数据（大小、修改时间、ETag）
-        :param key: 文件在 COS 中的完整路径
-        :return: 元数据字典
-        """
         try:
             response = self.client.head_object(
                 Bucket=self.bucket,
@@ -114,12 +84,6 @@ class CosAPI:
             return {}
 
     def upload_file(self, key: str, content: bytes) -> bool:
-        """
-        上传文件到 COS
-        :param key: 文件在 COS 中的完整路径
-        :param content: 文件内容的字节流
-        :return: 是否成功
-        """
         try:
             self.client.put_object(
                 Bucket=self.bucket,
@@ -132,11 +96,6 @@ class CosAPI:
             return False
 
     def delete_object(self, key: str) -> bool:
-        """
-        删除 COS 中的文件
-        :param key: 文件在 COS 中的完整路径
-        :return: 是否成功
-        """
         try:
             self.client.delete_object(
                 Bucket=self.bucket,
@@ -146,3 +105,32 @@ class CosAPI:
         except Exception as e:
             print(f"删除文件失败 {key}: {e}")
             return False
+
+    def get_presigned_url(self, key: str, expires: int = 3600, params: dict = None) -> str:
+        """
+        生成临时下载链接（预签名 URL），支持自定义参数
+        :param key: 文件在 COS 中的完整路径
+        :param expires: 有效期（秒），默认 3600 秒（1 小时）
+        :param params: 额外 URL 参数，如 {'response-content-disposition': 'inline'}
+        :return: 公网可访问的临时下载链接
+        """
+        try:
+            public_config = CosConfig(
+                Secret_id=self.secret_id,
+                Secret_key=self.secret_key,
+                Region=self.region,
+                Endpoint=None,
+                Scheme="https"
+            )
+            public_client = CosS3Client(public_config)
+            url = public_client.get_presigned_url(
+                Method='GET',
+                Bucket=self.bucket,
+                Key=key,
+                Expired=expires,
+                Params=params
+            )
+            return url
+        except Exception as e:
+            print(f"生成预签名 URL 失败 {key}: {e}")
+            raise

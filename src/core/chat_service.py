@@ -1,7 +1,8 @@
 # src/core/chat_service.py
 import os
 import traceback
-from typing import Generator
+from typing import Generator, Tuple, List, Dict, Any
+
 from openai import OpenAI
 
 from src.agents.router import route_agent
@@ -20,50 +21,87 @@ class ChatService:
         self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
         print(f"ChatService 初始化完成，模型: {self.model}")
 
-    def chat(self, user_query: str, top_k: int = 5) -> Generator[str, None, None]:
+    def chat(
+        self,
+        user_query: str,
+        top_k: int = 5
+    ) -> Generator[Tuple[str, List[Dict[str, Any]]], None, None]:
+        """
+        流式生成回复，同时返回来源信息
+        """
         try:
-            # 路由到对应专家
             intent, agent = route_agent(user_query)
             print(f"意图识别: {intent}")
 
-            # RAG 检索
             collection = self._get_collection_by_intent(intent)
-            context = retrieve_context(user_query, collection=collection, top_k=top_k)
-            if context:
-                print(f"检索到上下文，长度: {len(context)} 字符")
-            else:
-                print("未检索到相关上下文")
+            context, sources = retrieve_context(user_query, collection=collection, top_k=top_k)
+            print(f"检索到上下文，长度: {len(context) if context else 0} 字符")
+            print(f"来源数: {len(sources)}")
 
-            # 构造消息
-            prompt_data = agent.get_prompt(user_query, context)
-            messages = prompt_data["messages"]
+            # 传递来源信息给 Agent，用于生成带溯源标记的回复
+            messages = agent.get_prompt(
+                user_query,
+                context,
+                sources=sources  # 传递来源信息
+            )["messages"]
 
-            # 打印请求信息（调试用）
-            print(f"调用 DeepSeek API，模型: {self.model}")
-            print(f"消息数: {len(messages)}")
-            print(f"用户问题: {user_query[:50]}...")
-
-            # 调用 DeepSeek API
             response = self.deepseek_client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 stream=True,
                 temperature=0.3,
-                max_tokens=2048
+                max_tokens=1500
             )
 
-            # 流式返回
+            # 收集完整回复
+            full_content = ""
             for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                    content = chunk.choices[0].delta.content
+                    full_content += content
+                    yield content, sources
 
         except Exception as e:
-            print("=" * 60)
-            print(f"ChatService.chat() 发生异常: {e}")
+            print(f"ChatService.chat() 异常: {e}")
             traceback.print_exc()
-            print("=" * 60)
-            # 将错误信息作为生成器返回，方便上层处理
-            yield f"抱歉，处理请求时发生错误: {str(e)}"
+            yield f"抱歉，处理请求时发生错误: {str(e)}", []
+
+    def generate_reply_sync(
+        self,
+        user_query: str,
+        top_k: int = 5
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """同步生成完整回复，返回 (回复内容, 来源列表)"""
+        try:
+            intent, agent = route_agent(user_query)
+            print(f"意图识别: {intent}")
+
+            collection = self._get_collection_by_intent(intent)
+            context, sources = retrieve_context(user_query, collection=collection, top_k=top_k)
+            print(f"检索到上下文，长度: {len(context) if context else 0} 字符")
+            print(f"来源数: {len(sources)}")
+
+            messages = agent.get_prompt(
+                user_query,
+                context,
+                sources=sources
+            )["messages"]
+
+            response = self.deepseek_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=False,
+                temperature=0.3,
+                max_tokens=1500
+            )
+
+            content = response.choices[0].message.content
+            return content, sources
+
+        except Exception as e:
+            print(f"generate_reply_sync 异常: {e}")
+            traceback.print_exc()
+            return f"抱歉，处理请求时发生错误: {str(e)}", []
 
     def _get_collection_by_intent(self, intent: str) -> str:
         mapping = {

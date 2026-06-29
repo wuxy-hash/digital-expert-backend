@@ -1,14 +1,19 @@
 # src/main.py
 import os
 import time
+import html
+import re
+import urllib.parse
 from fastapi import FastAPI, Request, Query, HTTPException
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response, HTMLResponse, RedirectResponse
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.wecom.handler import WeComMessageHandler
+from src.wecom.handler import WeComMessageHandler, answer_store
+from src.utils.cos_api import CosAPI
 
+# ---------- 初始化 ----------
 TOKEN = os.getenv("WECOM_TOKEN")
 ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY")
 CORP_ID = os.getenv("WECOM_CORP_ID_A")
@@ -17,6 +22,15 @@ if not all([TOKEN, ENCODING_AES_KEY, CORP_ID]):
     raise Exception("企业微信回调配置不完整，请检查 .env 文件")
 
 handler = WeComMessageHandler(TOKEN, ENCODING_AES_KEY, CORP_ID)
+
+# COS 客户端
+cos = CosAPI(
+    secret_id=os.getenv("COS_SECRET_ID"),
+    secret_key=os.getenv("COS_SECRET_KEY"),
+    region=os.getenv("COS_REGION", "ap-guangzhou"),
+    bucket=os.getenv("COS_BUCKET"),
+    use_internal=True
+)
 
 app = FastAPI(title="数字化专家助手", version="1.0.0")
 
@@ -54,19 +68,20 @@ async def wecom_callback(
     try:
         result = handler.handle_message(msg_signature, timestamp, nonce, raw_body)
 
+        if result.get("type") == "empty":
+            print("返回空响应（异步模式）")
+            return Response(content="success", media_type="text/plain")
+
         if result["type"] == "text":
-            # 获取发送者和接收者
             from_user = getattr(handler, '_last_from_user', 'user')
             to_user = getattr(handler, '_last_to_user', 'bot')
-            
             reply_xml = handler.build_reply_xml(
-                to_user=from_user,  # 回复给发送者
+                to_user=from_user,
                 from_user=to_user,
                 content=result["content"],
                 timestamp=str(int(time.time())),
                 nonce=nonce
             )
-            print(f"回复 XML 长度: {len(reply_xml)}")
             return Response(content=reply_xml, media_type="application/xml")
 
         return {"status": "ok"}
@@ -77,18 +92,266 @@ async def wecom_callback(
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/test/reply")
-async def test_reply():
-    """测试回复格式是否正确"""
-    test_content = "这是一个测试回复"
-    from_user = "test_user"
-    to_user = "test_bot"
-    timestamp = str(int(time.time()))
-    nonce = "test_nonce"
-    
-    reply_xml = handler.build_reply_xml(to_user, from_user, test_content, timestamp, nonce)
-    return Response(content=reply_xml, media_type="application/xml")
 
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@app.get("/answer/{answer_id}")
+async def get_answer(answer_id: str):
+    content = answer_store.get(answer_id, "内容已过期或不存在（链接有效期为内存存活时间）")
+    
+    # ========== 调试：打印原始内容 ==========
+    print(f"原始内容: {content[:200]}...")
+    
+    # 1. 【关键】先替换 [来源：...] 格式（在 html.escape 之前）
+    from src.knowledge.index import load_index
+    index = load_index()
+    doc_name_to_key = {}
+    for key, meta in index.items():
+        doc_name_to_key[meta.get("file_name", "")] = key
+    
+    # 打印索引中的文档名，用于调试
+    print(f"索引中文档名: {list(doc_name_to_key.keys())[:10]}")
+    
+    def replace_source(match):
+        doc_name = match.group(1).strip()
+        print(f"✅ 匹配到来源: {doc_name}")
+        cos_key = doc_name_to_key.get(doc_name)
+        if cos_key:
+            try:
+                # 使用 inline 预览模式
+                presigned_url = cos.get_presigned_url(
+                    cos_key,
+                    expires=3600,
+                    params={'response-content-disposition': 'inline'}
+                )
+                return f'<a href="{presigned_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+            except Exception as e:
+                print(f"生成预签名 URL 失败: {e}")
+                return match.group(0)  # 保持原样
+        else:
+            print(f"⚠️ 未找到文档: {doc_name}")
+            return match.group(0)  # 保持原样
+    
+    # 使用中文冒号（注意：文本中使用的是中文冒号）
+    source_pattern = r'\[来源：([^\]]+)\]'
+    content = re.sub(source_pattern, replace_source, content)
+    print(f"替换后内容预览: {content[:200]}...")
+    
+    # 2. 再转义 HTML 特殊字符（防止 XSS）
+    escaped = html.escape(content)
+    
+    # 3. 处理换行
+    escaped = escaped.replace("\n", "<br>")
+    
+    # 4. 处理标准 Markdown 风格链接 [文本](url)
+    link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+    escaped = re.sub(link_pattern, r'<a href="\2" target="_blank" style="color: #1a73e8; text-decoration: underline;">\1</a>', escaped)
+    
+    # 5. 构建 HTML 页面
+    html_page = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>问答详情</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding: 16px;
+            line-height: 1.8;
+            max-width: 800px;
+            margin: 0 auto;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            background: #fafafa;
+            color: #333;
+        }}
+        .header {{
+            background: #fff;
+            padding: 16px 20px;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-bottom: 16px;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }}
+        .content {{
+            background: #fff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: pre-wrap;
+        }}
+        .content a {{
+            color: #1a73e8;
+            text-decoration: underline;
+        }}
+        .content a:hover {{
+            color: #0d47a1;
+        }}
+        .footer {{
+            margin-top: 16px;
+            color: #999;
+            font-size: 12px;
+            text-align: center;
+        }}
+        .content table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 12px 0;
+        }}
+        .content th, .content td {{
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            text-align: left;
+        }}
+        .content th {{
+            background: #f5f5f5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📄 完整回答</h1>
+    </div>
+    <div class="content">{escaped}</div>
+    <div class="footer">本文档仅用于查看，链接有效期内可访问</div>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_page)
+
+
+@app.get("/docs/{file_name:path}")
+async def get_doc(file_name: str):
+    """
+    网页预览功能：返回一个包含 PDF 预览器的 HTML 页面。
+    """
+    decoded_name = urllib.parse.unquote(file_name)
+
+    from src.knowledge.index import load_index
+    index = load_index()
+    found_key = None
+    for key, meta in index.items():
+        if meta.get("file_name") == decoded_name:
+            found_key = key
+            break
+
+    if not found_key:
+        return HTMLResponse("文件不存在或未入库", status_code=404)
+
+    try:
+        # 生成预签名 URL，强制预览模式
+        presigned_url = cos.get_presigned_url(
+            found_key,
+            expires=3600,
+            params={'response-content-disposition': 'inline'}
+        )
+
+        # 构建预览页面
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>文档预览 - {decoded_name}</title>
+            <style>
+                body {{
+                    margin: 0;
+                    padding: 0;
+                    height: 100vh;
+                    overflow: hidden;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                }}
+                .header {{
+                    background: #f8f9fa;
+                    padding: 12px 20px;
+                    border-bottom: 1px solid #e9ecef;
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    flex-wrap: wrap;
+                }}
+                .header-title {{
+                    font-size: 16px;
+                    font-weight: 500;
+                    color: #333;
+                    max-width: 60%;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }}
+                .header-actions {{
+                    display: flex;
+                    gap: 12px;
+                }}
+                .header-actions a {{
+                    color: #1a73e8;
+                    text-decoration: none;
+                    font-size: 14px;
+                }}
+                .header-actions a:hover {{
+                    text-decoration: underline;
+                }}
+                .preview-container {{
+                    width: 100%;
+                    height: calc(100vh - 60px);
+                }}
+                .preview-container iframe {{
+                    width: 100%;
+                    height: 100%;
+                    border: none;
+                }}
+                .loading {{
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: calc(100vh - 60px);
+                    color: #666;
+                    font-size: 16px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <span class="header-title">📄 {decoded_name}</span>
+                <div class="header-actions">
+                    <a href="{presigned_url}" target="_blank">📥 下载文档</a>
+                    <a href="javascript:history.back()">⬅ 返回</a>
+                </div>
+            </div>
+            <div class="preview-container" id="previewContainer">
+                <div class="loading" id="loadingIndicator">⏳ 加载文档预览中，请稍候...</div>
+                <iframe id="previewFrame" style="display:none;" src="{presigned_url}" allowfullscreen></iframe>
+            </div>
+            <script>
+                const iframe = document.getElementById('previewFrame');
+                const loading = document.getElementById('loadingIndicator');
+                iframe.onload = function() {{
+                    loading.style.display = 'none';
+                    iframe.style.display = 'block';
+                }};
+                setTimeout(() => {{
+                    if (loading.style.display !== 'none') {{
+                        loading.innerHTML = '⚠️ 文档加载较慢，请点击下方“下载文档”直接查看。<br><a href="{presigned_url}" target="_blank" style="color:#1a73e8;">点击立即下载</a>';
+                    }}
+                }}, 10000);
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+
+    except Exception as e:
+        print(f"预览生成失败: {e}")
+        return HTMLResponse(f"预览生成失败: {e}", status_code=500)

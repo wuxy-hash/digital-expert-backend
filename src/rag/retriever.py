@@ -1,5 +1,8 @@
 # src/rag/retriever.py
 import os
+import urllib.parse
+from typing import List, Dict, Any, Tuple
+
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
@@ -30,16 +33,17 @@ def retrieve_context(
     query: str,
     collection: str = "business",
     top_k: int = 5
-) -> str:
-    """从 Qdrant 检索与查询相关的文档片段"""
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    从 Qdrant 检索与查询相关的文档片段
+    返回: (拼接的上下文字符串, 来源列表，每个来源包含 file_name, url, chapter 等)
+    """
     client = _get_qdrant_client()
     model = _get_embedding_model()
 
     query_vector = model.encode(query).tolist()
 
-    # 兼容不同版本的 API
     try:
-        # 新版本 1.18+ 使用 query_points
         results = client.query_points(
             collection_name=collection,
             query=query_vector,
@@ -47,7 +51,6 @@ def retrieve_context(
             with_payload=True
         ).points
     except AttributeError:
-        # 旧版本 1.13 使用 search
         results = client.search(
             collection_name=collection,
             query_vector=query_vector,
@@ -56,12 +59,29 @@ def retrieve_context(
         )
 
     if not results:
-        return ""
+        return "", []
 
     context_parts = []
-    for hit in results:
-        text = hit.payload.get("text", "")
-        if text:
-            context_parts.append(f"[文档片段] {text}")
+    sources = []
 
-    return "\n\n".join(context_parts) if context_parts else ""
+    for idx, hit in enumerate(results, 1):
+        payload = hit.payload
+        text = payload.get("text", "")
+        file_name = payload.get("file_name", "未知文档")
+        # 生成超链接（URL 编码文件名）
+        encoded_name = urllib.parse.quote(file_name)
+        doc_url = f"https://wecom.infohub.com.cn/docs/{encoded_name}"
+        # 尝试提取章节（如果有）
+        chapter = payload.get("chapter", "")
+
+        if text:
+            context_parts.append(f"[{idx}] {text}")
+            sources.append({
+                "index": idx,
+                "file_name": file_name,
+                "chapter": chapter,
+                "url": doc_url,
+                "chunk_index": payload.get("chunk_index", 0)
+            })
+
+    return "\n\n".join(context_parts), sources
