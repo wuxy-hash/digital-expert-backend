@@ -141,22 +141,13 @@ async def wecom_callback(
 async def health():
     return {"status": "healthy", "env": get_active_env()}
 
-
-
 @app.get("/answer/{answer_id}")
 async def get_answer(answer_id: str):
     content = answer_store.get(answer_id, "内容已过期或不存在（链接有效期为内存存活时间）")
     
-    # 1. 构建文档名 → COS 预签名 URL 的映射（同时建立去扩展名映射）
+    # 1. 构建文档名 → COS 预签名 URL 的映射
     from src.knowledge.index import load_index
-    from src.utils.cos_api import CosAPI
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
-    
     index = load_index()
-    doc_name_to_url = {}
-    doc_name_no_ext_to_url = {}  # 新增：去扩展名映射
     
     cos = CosAPI(
         secret_id=os.getenv("COS_SECRET_ID"),
@@ -166,55 +157,99 @@ async def get_answer(answer_id: str):
         use_internal=True
     )
     
+    # 建立多种映射
+    doc_name_to_url = {}           # 精确匹配
+    doc_name_no_ext_to_url = {}    # 去扩展名匹配
+    doc_name_no_prefix_to_url = {} # 去掉编号前缀匹配
+    doc_name_no_version_to_url = {} # 去掉版本号匹配
+    doc_name_contains_to_url = {}  # 包含关系匹配
+    
     for key, meta in index.items():
         file_name = meta.get("file_name", "")
-        if file_name:
-            try:
-                presigned_url = cos.get_presigned_url(
-                    key,
-                    expires=3600,
-                    params={'response-content-disposition': 'inline'}
-                )
-                # 精确匹配
-                doc_name_to_url[file_name] = presigned_url
-                # 去扩展名匹配（最后一个点之后的部分）
-                if '.' in file_name:
-                    base_name = file_name.rsplit('.', 1)[0]
-                    if base_name not in doc_name_no_ext_to_url:
-                        doc_name_no_ext_to_url[base_name] = presigned_url
-                # 额外：去掉中文括号及内容（如 "（培训稿）" → ""）
-                import re
-                cleaned_name = re.sub(r'[（(][^）)]*[）)]', '', file_name).strip()
-                cleaned_name = cleaned_name.rsplit('.', 1)[0] if '.' in cleaned_name else cleaned_name
-                if cleaned_name not in doc_name_no_ext_to_url:
-                    doc_name_no_ext_to_url[cleaned_name] = presigned_url
-            except Exception as e:
-                print(f"生成预签名 URL 失败 {file_name}: {e}")
+        if not file_name:
+            continue
+            
+        try:
+            presigned_url = cos.get_presigned_url(
+                key,
+                expires=3600,
+                params={'response-content-disposition': 'inline'}
+            )
+            
+            # 1. 精确匹配
+            doc_name_to_url[file_name] = presigned_url
+            
+            # 2. 去扩展名匹配
+            if '.' in file_name:
+                base_name = file_name.rsplit('.', 1)[0]
+                doc_name_no_ext_to_url[base_name] = presigned_url
+            
+            # 3. 去掉编号前缀（如 "07-大圣科技系统运维管理手册V1.1" → "大圣科技系统运维管理手册V1.1"）
+            # 匹配模式：数字 + 横杠 + 空格？ 或 数字 + 点 + 空格？
+            cleaned = re.sub(r'^\d+[-\.]\s*', '', file_name)
+            cleaned = cleaned.rsplit('.', 1)[0] if '.' in cleaned else cleaned
+            doc_name_no_prefix_to_url[cleaned] = presigned_url
+            
+            # 4. 去掉版本号（如 "大圣科技系统运维管理手册V1.1" → "大圣科技系统运维管理手册"）
+            cleaned_no_version = re.sub(r'[Vv]\d+(\.\d+)?', '', file_name)
+            cleaned_no_version = cleaned_no_version.rsplit('.', 1)[0] if '.' in cleaned_no_version else cleaned_no_version
+            # 去除可能残留的横杠、空格
+            cleaned_no_version = cleaned_no_version.strip(' -')
+            doc_name_no_version_to_url[cleaned_no_version] = presigned_url
+            
+            # 5. 同时去掉编号和版本号
+            cleaned_both = re.sub(r'^\d+[-\.]\s*', '', file_name)
+            cleaned_both = re.sub(r'[Vv]\d+(\.\d+)?', '', cleaned_both)
+            cleaned_both = cleaned_both.rsplit('.', 1)[0] if '.' in cleaned_both else cleaned_both
+            cleaned_both = cleaned_both.strip(' -')
+            doc_name_no_version_to_url[cleaned_both] = presigned_url
+            
+            # 6. 包含关系（索引文档名包含大模型返回的名称）
+            doc_name_contains_to_url[file_name] = presigned_url
+            
+        except Exception as e:
+            logger.error(f"生成预签名 URL 失败 {file_name}: {e}")
     
-    # 2. 替换 [来源：文档名] 为 HTML 链接
-    # 优先精确匹配，再尝试去扩展名匹配
+    # 2. 定义替换函数：多策略匹配
     def replace_html(match):
         doc_name = match.group(1).strip()
-        # 1. 精确匹配
+        
+        # 策略1：精确匹配
         if doc_name in doc_name_to_url:
             return f'<a href="{doc_name_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-        # 2. 去扩展名匹配
+        
+        # 策略2：去扩展名匹配
         if doc_name in doc_name_no_ext_to_url:
             return f'<a href="{doc_name_no_ext_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-        # 3. 如果包含中括号（如 12-运维规范纲领(正式版)），尝试去掉括号内容后再匹配
-        import re
+        
+        # 策略3：去掉编号前缀匹配
+        if doc_name in doc_name_no_prefix_to_url:
+            return f'<a href="{doc_name_no_prefix_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        
+        # 策略4：去掉版本号匹配
+        if doc_name in doc_name_no_version_to_url:
+            return f'<a href="{doc_name_no_version_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        
+        # 策略5：包含关系匹配（索引文档名包含 doc_name）
+        for indexed_name, url in doc_name_contains_to_url.items():
+            if doc_name in indexed_name:
+                return f'<a href="{url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        
+        # 策略6：去掉中文括号后匹配
         cleaned = re.sub(r'[（(][^）)]*[）)]', '', doc_name).strip()
-        if cleaned in doc_name_no_ext_to_url:
-            return f'<a href="{doc_name_no_ext_to_url[cleaned]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-        # 4. 如果都没匹配到，保留原样
+        if cleaned in doc_name_no_version_to_url:
+            return f'<a href="{doc_name_no_version_to_url[cleaned]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        
+        # 所有策略都失败，保留原样
         return match.group(0)
     
+    # 3. 执行替换
     content = re.sub(r'\[来源：([^\]]+)\]', replace_html, content)
     
-    # 3. 处理换行
+    # 4. 处理换行
     content_with_breaks = content.replace("\n", "<br>")
     
-    # 4. 构建 HTML 页面
+    # 5. 构建 HTML 页面
     html_page = f"""
 <!DOCTYPE html>
 <html>
