@@ -147,7 +147,7 @@ async def health():
 async def get_answer(answer_id: str):
     content = answer_store.get(answer_id, "内容已过期或不存在（链接有效期为内存存活时间）")
     
-    # 1. 构建文档名 → COS 预签名 URL 的映射（从索引中获取）
+    # 1. 构建文档名 → COS 预签名 URL 的映射（同时建立去扩展名映射）
     from src.knowledge.index import load_index
     from src.utils.cos_api import CosAPI
     import os
@@ -156,6 +156,8 @@ async def get_answer(answer_id: str):
     
     index = load_index()
     doc_name_to_url = {}
+    doc_name_no_ext_to_url = {}  # 新增：去扩展名映射
+    
     cos = CosAPI(
         secret_id=os.getenv("COS_SECRET_ID"),
         secret_key=os.getenv("COS_SECRET_KEY"),
@@ -173,18 +175,41 @@ async def get_answer(answer_id: str):
                     expires=3600,
                     params={'response-content-disposition': 'inline'}
                 )
+                # 精确匹配
                 doc_name_to_url[file_name] = presigned_url
+                # 去扩展名匹配（最后一个点之后的部分）
+                if '.' in file_name:
+                    base_name = file_name.rsplit('.', 1)[0]
+                    if base_name not in doc_name_no_ext_to_url:
+                        doc_name_no_ext_to_url[base_name] = presigned_url
+                # 额外：去掉中文括号及内容（如 "（培训稿）" → ""）
+                import re
+                cleaned_name = re.sub(r'[（(][^）)]*[）)]', '', file_name).strip()
+                cleaned_name = cleaned_name.rsplit('.', 1)[0] if '.' in cleaned_name else cleaned_name
+                if cleaned_name not in doc_name_no_ext_to_url:
+                    doc_name_no_ext_to_url[cleaned_name] = presigned_url
             except Exception as e:
-                logger.error(f"生成预签名 URL 失败 {file_name}: {e}")
+                print(f"生成预签名 URL 失败 {file_name}: {e}")
     
     # 2. 替换 [来源：文档名] 为 HTML 链接
-    if doc_name_to_url:
-        def replace_html(match):
-            doc_name = match.group(1).strip()
-            if doc_name in doc_name_to_url:
-                return f'<a href="{doc_name_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-            return match.group(0)
-        content = re.sub(r'\[来源：([^\]]+)\]', replace_html, content)
+    # 优先精确匹配，再尝试去扩展名匹配
+    def replace_html(match):
+        doc_name = match.group(1).strip()
+        # 1. 精确匹配
+        if doc_name in doc_name_to_url:
+            return f'<a href="{doc_name_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        # 2. 去扩展名匹配
+        if doc_name in doc_name_no_ext_to_url:
+            return f'<a href="{doc_name_no_ext_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        # 3. 如果包含中括号（如 12-运维规范纲领(正式版)），尝试去掉括号内容后再匹配
+        import re
+        cleaned = re.sub(r'[（(][^）)]*[）)]', '', doc_name).strip()
+        if cleaned in doc_name_no_ext_to_url:
+            return f'<a href="{doc_name_no_ext_to_url[cleaned]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+        # 4. 如果都没匹配到，保留原样
+        return match.group(0)
+    
+    content = re.sub(r'\[来源：([^\]]+)\]', replace_html, content)
     
     # 3. 处理换行
     content_with_breaks = content.replace("\n", "<br>")
