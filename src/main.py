@@ -12,18 +12,28 @@ load_dotenv()
 
 from src.wecom.handler import WeComMessageHandler, answer_store
 from src.utils.cos_api import CosAPI
+from src.utils.config import get_env_for_env, get_active_env, is_production
+from src.utils.logger import logger, access_logger
+from src.alert.wecom_alert import alert
 
-# ---------- 初始化 ----------
-TOKEN = os.getenv("WECOM_TOKEN")
-ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY")
-CORP_ID = os.getenv("WECOM_CORP_ID_A")
+# ===== 根据环境读取配置 =====
+TOKEN = get_env_for_env("WECOM_TOKEN")
+ENCODING_AES_KEY = get_env_for_env("WECOM_ENCODING_AES_KEY")
+CORP_ID = get_env_for_env("WECOM_CORP_ID")
+AGENT_ID = get_env_for_env("WECOM_AGENT_ID")
+CALLBACK_DOMAIN = get_env_for_env("WECOM_CALLBACK_DOMAIN")
+SERVER_PORT = int(get_env_for_env("SERVER_PORT", "8005"))
 
 if not all([TOKEN, ENCODING_AES_KEY, CORP_ID]):
     raise Exception("企业微信回调配置不完整，请检查 .env 文件")
 
+logger.info(f"当前环境: {get_active_env()}")
+logger.info(f"服务端口: {SERVER_PORT}")
+logger.info(f"回调域名: {CALLBACK_DOMAIN}")
+
+# ===== 初始化 =====
 handler = WeComMessageHandler(TOKEN, ENCODING_AES_KEY, CORP_ID)
 
-# COS 客户端
 cos = CosAPI(
     secret_id=os.getenv("COS_SECRET_ID"),
     secret_key=os.getenv("COS_SECRET_KEY"),
@@ -35,9 +45,43 @@ cos = CosAPI(
 app = FastAPI(title="数字化专家助手", version="1.0.0")
 
 
+# ===== 访问日志中间件 =====
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    access_logger.info(
+        f"{request.method} {request.url.path} | "
+        f"Status: {response.status_code} | "
+        f"Time: {process_time:.3f}s"
+    )
+    return response
+
+
+# ===== 启动/关闭事件 =====
+@app.on_event("startup")
+async def startup_event():
+    logger.info(f"服务启动中，环境: {get_active_env()}")
+    try:
+        alert.send_startup()
+    except Exception as e:
+        logger.error(f"发送启动告警失败: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info(f"服务关闭中，环境: {get_active_env()}")
+    try:
+        alert.send_shutdown("服务正常关闭")
+    except Exception as e:
+        logger.error(f"发送关闭告警失败: {e}")
+
+
+# ===== 路由 =====
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "数字化专家助手"}
+    return {"status": "ok", "service": "数字化专家助手", "env": get_active_env()}
 
 
 @app.get("/wecom/callback")
@@ -51,7 +95,7 @@ async def wecom_verify(
         result = handler.handle_verify(msg_signature, timestamp, nonce, echostr)
         return PlainTextResponse(result)
     except Exception as e:
-        print(f"验证失败: {e}")
+        logger.error(f"验证失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -63,13 +107,13 @@ async def wecom_callback(
     nonce: str = Query(...)
 ):
     raw_body = await request.body()
-    print(f"收到 POST 请求，请求体长度: {len(raw_body)}")
+    logger.info(f"收到 POST 请求，请求体长度: {len(raw_body)}")
 
     try:
         result = handler.handle_message(msg_signature, timestamp, nonce, raw_body)
 
         if result.get("type") == "empty":
-            print("返回空响应（异步模式）")
+            logger.info("返回空响应（异步模式）")
             return Response(content="success", media_type="text/plain")
 
         if result["type"] == "text":
@@ -88,69 +132,40 @@ async def wecom_callback(
 
     except Exception as e:
         import traceback
-        print(f"POST 处理异常: {e}")
-        traceback.print_exc()
+        logger.error(f"POST 处理异常: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "env": get_active_env()}
 
 
 @app.get("/answer/{answer_id}")
 async def get_answer(answer_id: str):
     content = answer_store.get(answer_id, "内容已过期或不存在（链接有效期为内存存活时间）")
-    
-    # 1. 构建文档名映射（精确匹配 + 去扩展名匹配）
+
+    # 1. 构建文档名映射
     from src.knowledge.index import load_index
     index = load_index()
-    
-    # 精确映射：文档名 → COS Key
     doc_name_to_key = {}
-    # 去扩展名映射：文档名（不含扩展名）→ COS Key（取第一个匹配）
     doc_name_no_ext_to_key = {}
-    
     for key, meta in index.items():
         file_name = meta.get("file_name", "")
         if file_name:
             doc_name_to_key[file_name] = key
-            # 去掉扩展名（最后一个点之后的部分）
             if '.' in file_name:
                 base_name = file_name.rsplit('.', 1)[0]
-                # 如果多个文件同名（不同扩展名），保留第一个
                 if base_name not in doc_name_no_ext_to_key:
                     doc_name_no_ext_to_key[base_name] = key
-    
-    print(f"索引中共有 {len(doc_name_to_key)} 个文档")
-    print(f"去扩展名映射共 {len(doc_name_no_ext_to_key)} 个文档")
-    
+
     def replace_source(match):
         doc_name = match.group(1).strip()
-        print(f"✅ 匹配到来源: {doc_name}")
-        
-        # 1. 先尝试精确匹配
         cos_key = doc_name_to_key.get(doc_name)
-        if cos_key:
-            print(f"  精确匹配成功: {doc_name} → {cos_key}")
-        else:
-            # 2. 精确匹配失败，尝试去掉末尾可能存在的多余字符（如空格、.pdf等）
-            # 但主要策略：尝试去掉扩展名匹配
+        if not cos_key:
             base_name = doc_name.rsplit('.', 1)[0] if '.' in doc_name else doc_name
             cos_key = doc_name_no_ext_to_key.get(base_name)
-            if cos_key:
-                print(f"  去扩展名匹配成功: {base_name} → {cos_key}")
-            else:
-                # 3. 额外尝试：去掉结尾的 .pdf、.docx 等（如果用户手动输入）
-                # 实际上 DeepSeek 返回的没有扩展名，所以这个分支可能用不到
-                for ext in ['.pdf', '.docx', '.xlsx', '.pptx', '.txt']:
-                    if doc_name.endswith(ext):
-                        alt_name = doc_name[:-len(ext)]
-                        cos_key = doc_name_no_ext_to_key.get(alt_name)
-                        if cos_key:
-                            print(f"  去除后缀匹配成功: {alt_name} → {cos_key}")
-                            break
-        
         if cos_key:
             try:
                 presigned_url = cos.get_presigned_url(
@@ -160,25 +175,21 @@ async def get_answer(answer_id: str):
                 )
                 return f'<a href="{presigned_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
             except Exception as e:
-                print(f"生成预签名 URL 失败: {e}")
+                logger.error(f"生成预签名 URL 失败: {e}")
                 return match.group(0)
-        else:
-            print(f"⚠️ 未找到文档: {doc_name}")
-            return match.group(0)
-    
-    # 使用中文冒号（文本中使用的是中文冒号）
+        return match.group(0)
+
     source_pattern = r'\[来源：([^\]]+)\]'
     content = re.sub(source_pattern, replace_source, content)
-    
-    # 2. 转义 HTML
+
     escaped = html.escape(content)
     escaped = escaped.replace("\n", "<br>")
-    
-    # 3. 处理标准 Markdown 链接
+
     link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
     escaped = re.sub(link_pattern, r'<a href="\2" target="_blank" style="color: #1a73e8; text-decoration: underline;">\1</a>', escaped)
-    
-    # 4. HTML 模板（与之前相同）
+
+    base_url = f"https://{CALLBACK_DOMAIN}"
+
     html_page = f"""
 <!DOCTYPE html>
 <html>
@@ -250,6 +261,7 @@ async def get_answer(answer_id: str):
 <body>
     <div class="header">
         <h1>📄 完整回答</h1>
+        <p style="font-size:14px;color:#999;">环境: {get_active_env()}</p>
     </div>
     <div class="content">{escaped}</div>
     <div class="footer">本文档仅用于查看，链接有效期内可访问</div>
@@ -261,9 +273,6 @@ async def get_answer(answer_id: str):
 
 @app.get("/docs/{file_name:path}")
 async def get_doc(file_name: str):
-    """
-    网页预览功能：返回一个包含 PDF 预览器的 HTML 页面。
-    """
     decoded_name = urllib.parse.unquote(file_name)
 
     from src.knowledge.index import load_index
@@ -278,14 +287,12 @@ async def get_doc(file_name: str):
         return HTMLResponse("文件不存在或未入库", status_code=404)
 
     try:
-        # 生成预签名 URL，强制预览模式
         presigned_url = cos.get_presigned_url(
             found_key,
             expires=3600,
             params={'response-content-disposition': 'inline'}
         )
 
-        # 构建预览页面
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -371,7 +378,7 @@ async def get_doc(file_name: str):
                 }};
                 setTimeout(() => {{
                     if (loading.style.display !== 'none') {{
-                        loading.innerHTML = '⚠️ 文档加载较慢，请点击下方“下载文档”直接查看。<br><a href="{presigned_url}" target="_blank" style="color:#1a73e8;">点击立即下载</a>';
+                        loading.innerHTML = '⚠️ 文档加载较慢，请点击下方"下载文档"直接查看。<br><a href="{presigned_url}" target="_blank" style="color:#1a73e8;">点击立即下载</a>';
                     }}
                 }}, 10000);
             </script>
@@ -381,5 +388,5 @@ async def get_doc(file_name: str):
         return HTMLResponse(content=html_content)
 
     except Exception as e:
-        print(f"预览生成失败: {e}")
+        logger.error(f"预览生成失败: {e}")
         return HTMLResponse(f"预览生成失败: {e}", status_code=500)
