@@ -1,4 +1,5 @@
 # src/wecom/sender.py
+import os
 import time
 import requests
 from typing import Optional
@@ -28,7 +29,6 @@ class WeComSender:
         return self._access_token
 
     def send_text(self, user_id: str, content: str) -> dict:
-        """发送文本消息"""
         token = self._get_access_token()
         url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
 
@@ -44,6 +44,23 @@ class WeComSender:
             print(f"发送文本消息失败: {resp}")
         return resp
 
+    def send_markdown(self, user_id: str, content: str) -> dict:
+        """发送 Markdown 消息，支持 [文本](url) 格式的链接"""
+        token = self._get_access_token()
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
+
+        payload = {
+            "touser": user_id,
+            "msgtype": "markdown",
+            "agentid": int(self.agent_id),
+            "markdown": {"content": content}
+        }
+
+        resp = requests.post(url, json=payload, timeout=10).json()
+        if resp.get("errcode") != 0:
+            print(f"发送 Markdown 消息失败: {resp}")
+        return resp
+
     def send_news(
         self,
         user_id: str,
@@ -52,7 +69,6 @@ class WeComSender:
         url: str,
         picurl: Optional[str] = None
     ) -> dict:
-        """发送图文消息"""
         token = self._get_access_token()
         api_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
 

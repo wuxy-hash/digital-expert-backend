@@ -10,8 +10,9 @@ from typing import Dict, Any
 from src.wecom.crypto import WeComCrypto
 from src.wecom.sender import WeComSender
 from src.core.chat_service import ChatService
+from src.utils.config import get_env_for_env, get_active_env
+from src.utils.logger import logger
 
-# 全局存储（用于详情页）
 answer_store = {}
 
 
@@ -22,13 +23,10 @@ class WeComMessageHandler:
         self._last_from_user = ""
         self._last_to_user = ""
 
-        import os
-        from dotenv import load_dotenv
-        load_dotenv()
         self.sender = WeComSender(
-            corp_id=os.getenv("WECOM_CORP_ID_A"),
-            agent_id=os.getenv("WECOM_AGENT_ID_A"),
-            secret=os.getenv("WECOM_SECRET_A")
+            corp_id=get_env_for_env("WECOM_CORP_ID"),
+            agent_id=get_env_for_env("WECOM_AGENT_ID"),
+            secret=get_env_for_env("WECOM_SECRET")
         )
 
     def handle_verify(self, msg_signature: str, timestamp: str, nonce: str, echostr: str) -> str:
@@ -36,8 +34,7 @@ class WeComMessageHandler:
 
     def handle_message(self, msg_signature: str, timestamp: str, nonce: str, raw_body: bytes) -> Dict[str, Any]:
         try:
-            print("=" * 60)
-            print("收到企业微信消息回调（异步 + 进度反馈）")
+            logger.info("收到企业微信消息回调（异步 + 进度反馈）")
 
             root = ET.fromstring(raw_body)
             encrypt = root.find("Encrypt").text
@@ -53,51 +50,54 @@ class WeComMessageHandler:
             user_query = msg_root.find("Content").text
             user_query = self._clean_mention(user_query)
 
-            print(f"发送者: {from_user}")
-            print(f"用户问题: {user_query}")
+            logger.info(f"发送者: {from_user}")
+            logger.info(f"用户问题: {user_query}")
 
             if not user_query or not user_query.strip():
                 return {"type": "text", "content": "请发送具体的问题，我会为您解答。"}
 
-            # ---------- 步骤1：立即发送“已收到” ----------
+            # 步骤1：已收到
             self.sender.send_text(from_user, "📥 已收到您的问题，正在处理中...（1/3）")
 
             def async_reply():
                 try:
-                    # ---------- 步骤2：稍等片刻后发送“检索中” ----------
-                    time.sleep(0.5)  # 确保上一条消息已发送
+                    time.sleep(0.5)
                     self.sender.send_text(from_user, "🔍 正在检索知识库...（2/3）")
 
-                    # 调用 DeepSeek 生成回复
                     reply, sources = self.chat_service.generate_reply_sync(user_query.strip())
-                    print(f"回复长度: {len(reply)} 字符")
+                    logger.info(f"回复长度: {len(reply)} 字符")
 
-                    # ---------- 步骤3：拼接进度前缀 ----------
                     progress_msg = "✅ 已完成检索，正在生成回复...（3/3）\n\n"
                     full_reply = progress_msg + reply
 
-                    # ---------- 超链接替换：将 [来源：文档名] 替换为可点击链接 ----------
-                    if sources:
-                        for s in sources:
-                            doc_name = s.get("file_name", "")
-                            url = s.get("url", "#")
-                            if doc_name and url:
-                                # 替换 [来源：文档名] 为 Markdown 风格链接
-                                # 企业微信支持 [文本](url) 格式的链接
-                                pattern = re.compile(r'\[来源：' + re.escape(doc_name) + r'\]')
-                                # 添加样式提示：用 📎 图标表示可点击
-                                full_reply = pattern.sub(f'[📎 {doc_name}]({url})', full_reply)
-                        # 如果还有未被替换的 [来源：xxx]，保留原样
-
-                    # ---------- 长度判断 ----------
-                    MAX_TEXT_LEN = 1200
+                    # ---------- 判断是否超长 ----------
+                    MAX_TEXT_LEN = 1200  # 保守阈值
                     if len(full_reply) <= MAX_TEXT_LEN:
-                        self.sender.send_text(from_user, full_reply)
+                        # 短消息：使用 Markdown 格式发送，支持 [文本](url) 链接
+                        if sources:
+                            # 构建文档名 → URL 映射
+                            doc_url_map = {}
+                            for s in sources:
+                                doc_name = s.get('file_name')
+                                url = s.get('url')
+                                if doc_name and url:
+                                    doc_url_map[doc_name] = url
+
+                            def replace_md(match):
+                                doc_name = match.group(1).strip()
+                                if doc_name in doc_url_map:
+                                    return f'[{doc_name}]({doc_url_map[doc_name]})'
+                                return match.group(0)
+
+                            full_reply = re.sub(r'\[来源：([^\]]+)\]', replace_html, full_reply)
+                            self.sender.send_text(from_user, full_reply)
+                        else:
+                            self.sender.send_text(from_user, full_reply)
                     else:
-                        # 超长：存储到内存，生成详情页链接
+                        # 超长：存储到内存，生成详情页链接（详情页中可以使用 HTML 链接）
                         answer_id = str(uuid.uuid4())[:8]
-                        answer_store[answer_id] = full_reply
-                        detail_url = f"https://wecom.infohub.com.cn/answer/{answer_id}"
+                        answer_store[answer_id] = full_reply  # 存储原始内容（含 [来源：...]）
+                        detail_url = f"https://{get_env_for_env('WECOM_CALLBACK_DOMAIN')}/answer/{answer_id}"
                         summary = full_reply[:200] + "...（点击下方链接查看完整内容）"
                         self.sender.send_news(
                             user_id=from_user,
@@ -107,18 +107,18 @@ class WeComMessageHandler:
                         )
 
                 except Exception as e:
-                    print(f"后台线程异常: {e}")
+                    logger.error(f"后台线程异常: {e}")
                     traceback.print_exc()
                     self.sender.send_text(from_user, f"抱歉，处理请求时发生错误: {str(e)[:100]}")
 
             thread = threading.Thread(target=async_reply, daemon=True)
             thread.start()
-            print("后台线程已启动")
+            logger.info("后台线程已启动")
 
             return {"type": "empty"}
 
         except Exception as e:
-            print(f"处理异常: {e}")
+            logger.error(f"处理异常: {e}")
             traceback.print_exc()
             return {"type": "text", "content": "服务异常，请稍后重试。"}
 
@@ -136,12 +136,10 @@ class WeComMessageHandler:
 </xml>"""
 
         encrypt, msg_signature = self.crypto.encrypt_message(reply_xml, timestamp, nonce)
-
         response_xml = f"""<xml>
 <Encrypt><![CDATA[{encrypt}]]></Encrypt>
 <MsgSignature><![CDATA[{msg_signature}]]></MsgSignature>
 <TimeStamp>{timestamp}</TimeStamp>
 <Nonce><![CDATA[{nonce}]]></Nonce>
 </xml>"""
-
         return response_xml
