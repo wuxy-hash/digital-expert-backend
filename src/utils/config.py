@@ -1,11 +1,12 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(override=False)
+# 显式指定 .env 路径（解决 systemd 环境下找不到文件的问题）
+ENV_FILE = '/opt/digital-expert-pro/.env'
+load_dotenv(ENV_FILE, override=False)
 
 ACTIVE_ENV = os.getenv("ACTIVE_ENV", "test")
 
-# 根据环境决定后缀
 if ACTIVE_ENV == "production":
     ENV_SUFFIX = "PROD"
 elif ACTIVE_ENV == "test":
@@ -14,11 +15,9 @@ else:
     ENV_SUFFIX = ACTIVE_ENV.upper()
 
 def get_env(key: str, default: str = None) -> str:
-    """直接读取环境变量（不进行环境映射）"""
     return os.getenv(key, default)
 
 def get_env_for_env(key: str, default: str = None) -> str:
-    """根据当前环境读取对应的配置值"""
     env_mapping = {
         "WECOM_CORP_ID": f"WECOM_{ENV_SUFFIX}_CORP_ID",
         "WECOM_AGENT_ID": f"WECOM_{ENV_SUFFIX}_AGENT_ID",
