@@ -142,20 +142,32 @@ async def health():
     return {"status": "healthy", "env": get_active_env()}
 
 
+
 @app.get("/answer/{answer_id}")
 async def get_answer(answer_id: str):
-    # 1. 从存储中获取原始内容
     content = answer_store.get(answer_id, "内容已过期或不存在（链接有效期为内存存活时间）")
     
-    # 2. 构建文档名到 COS 预签名 URL 的映射
+    # 1. 构建文档名 → COS 预签名 URL 的映射（从索引中获取）
     from src.knowledge.index import load_index
+    from src.utils.cos_api import CosAPI
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     index = load_index()
     doc_name_to_url = {}
+    cos = CosAPI(
+        secret_id=os.getenv("COS_SECRET_ID"),
+        secret_key=os.getenv("COS_SECRET_KEY"),
+        region=os.getenv("COS_REGION", "ap-guangzhou"),
+        bucket=os.getenv("COS_BUCKET"),
+        use_internal=True
+    )
+    
     for key, meta in index.items():
         file_name = meta.get("file_name", "")
         if file_name:
             try:
-                # 生成预签名 URL（用于详情页的链接）
                 presigned_url = cos.get_presigned_url(
                     key,
                     expires=3600,
@@ -165,85 +177,19 @@ async def get_answer(answer_id: str):
             except Exception as e:
                 logger.error(f"生成预签名 URL 失败 {file_name}: {e}")
     
-    # 3. 定义替换函数：将 [来源：文档名] 转换为 HTML 超链接
-    def replace_source_link(match):
-        doc_name = match.group(1).strip()
-        url = doc_name_to_url.get(doc_name)
-        if url:
-            # 返回一个可点击的 HTML 链接
-            return f'<a href="{url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-        return match.group(0)  # 如果找不到映射，保留原文
+    # 2. 替换 [来源：文档名] 为 HTML 链接
+    if doc_name_to_url:
+        def replace_html(match):
+            doc_name = match.group(1).strip()
+            if doc_name in doc_name_to_url:
+                return f'<a href="{doc_name_to_url[doc_name]}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
+            return match.group(0)
+        content = re.sub(r'\[来源：([^\]]+)\]', replace_html, content)
     
-    # 4. 执行替换（在转义 HTML 之前）
-    # 匹配 [来源：任意字符] 格式
-    source_pattern = r'\[来源：([^\]]+)\]'
-    content = re.sub(source_pattern, replace_source_link, content)
-    
-    # 5. 【新增】处理 DeepSeek 模型生成的另一种引用格式：【数字†文档名†URL】
-    # 匹配 【数字†文档名†URL】 格式
-    ref_pattern = r'【\d+†([^†]+)†([^】]+)】'
-    def replace_ref_link(match):
-        doc_name = match.group(1).strip()
-        url = match.group(2).strip()
-        # 如果 URL 是完整的，直接使用；否则尝试从映射中查找
-        if url.startswith('http'):
-            return f'<a href="{url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-        else:
-            # 如果 URL 不完整，尝试从映射中获取
-            full_url = doc_name_to_url.get(doc_name)
-            if full_url:
-                return f'<a href="{full_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">📎 {doc_name}</a>'
-        return match.group(0)
-    
-    content = re.sub(ref_pattern, replace_ref_link, content)
-    
-    # 6. 转义 HTML 特殊字符（防止 XSS 攻击）
-    # 注意：我们刚刚插入的 <a> 标签不能被转义，所以这里需要小心处理
-    # 简单起见，我们可以先转义，然后再把安全的 <a> 标签替换回来
-    # 但更好的方法是使用 bleach 等库，或者分段处理
-    # 这里我们采用先替换再转义的方式，并确保链接是安全的
-    # 由于我们已经控制了链接的生成，可以认为它们是安全的
-    # 但为了安全，我们只转义 content 中除了我们生成的链接之外的部分
-    # 这里我们简化处理：先转义全部，再恢复链接
-    # 更好的方法是使用 markdown 或自定义渲染，但这里我们简单处理
-    # 我们将链接部分用占位符替换，转义后再换回来
-    # 但为了代码清晰，我们直接采用一种更简单的方法：不转义整个内容，而是转义非链接部分
-    # 由于我们的链接是安全的，我们可以直接使用 HTMLResponse 返回，并信任内容
-    # 但为了安全，我们还是要确保内容中没有恶意脚本
-    # 这里我们使用 html.escape 但保留 <a> 标签
-    # 一个简单的方法是使用 regex 来保护 <a> 标签
-    
-    # 更稳健的方法：使用 Bleach 库，但为了减少依赖，我们手动处理
-    # 我们将内容分段，只转义非链接部分
-    # 或者，我们直接信任内容，因为内容来自我们自己的系统
-    # 这里我们采用一种简单的方法：先转义，然后恢复 <a> 标签
-    # 但注意：这可能会引入风险，如果内容中包含用户输入的恶意代码
-    # 由于内容来自 DeepSeek，且我们控制了链接生成，风险较低
-    # 为了快速修复，我们直接使用 HTMLResponse 返回，不转义
-    # 但为了安全，我们只允许 <a> 标签，其他标签转义
-    # 这里我们使用一个简单的策略：转义所有内容，然后恢复 <a> 标签
-    import html
-    # 先转义
-    escaped = html.escape(content)
-    # 然后恢复 <a> 标签（注意：我们生成的链接格式是固定的）
-    # 但更好的方法是使用 BeautifulSoup 或 bleach
-    # 为了快速修复，我们采用一个简单的方法：在转义之前，将链接替换为占位符
-    # 但为了代码简洁，我们采用以下方式：
-    # 我们信任内容，直接返回 HTML
-    # 但为了安全，我们只允许 <a> 标签，并且只允许特定的属性
-    # 这里我们简单处理，直接返回
-    
-    # 由于我们已经替换了链接，并且我们信任内容，我们直接返回
-    # 但为了安全，我们使用一个简单的过滤器：只允许 <a> 标签
-    # 这里我们使用一个简单的正则来移除其他标签
-    # 但为了快速修复，我们直接返回，因为内容来自可信源
-    # 我们添加一个 Content-Security-Policy 头来增强安全性
-    
-    # 这里我们直接使用替换后的内容
-    # 处理换行
+    # 3. 处理换行
     content_with_breaks = content.replace("\n", "<br>")
     
-    # 7. 构建 HTML 页面
+    # 4. 构建 HTML 页面
     html_page = f"""
 <!DOCTYPE html>
 <html>
@@ -322,10 +268,6 @@ async def get_answer(answer_id: str):
 </body>
 </html>
     """
-    # 注意：这里我们使用 content_with_breaks，它包含了替换后的链接
-    # 我们不再使用 escaped，而是直接使用替换后的内容
-    # 但为了安全，我们确保链接是安全的
-    # 这里我们返回 HTMLResponse
     return HTMLResponse(content=html_page)
 
 

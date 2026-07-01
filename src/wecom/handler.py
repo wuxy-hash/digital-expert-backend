@@ -70,33 +70,34 @@ class WeComMessageHandler:
                     progress_msg = "✅ 已完成检索，正在生成回复...（3/3）\n\n"
                     full_reply = progress_msg + reply
 
+                    # ---------- 构建文档名 → URL 映射 ----------
+                    doc_url_map = {}
+                    if sources:
+                        for s in sources:
+                            doc_name = s.get('file_name')
+                            url = s.get('url')
+                            if doc_name and url:
+                                doc_url_map[doc_name] = url
+
+                    # ---------- 替换 [来源：文档名] 为 HTML 链接 ----------
+                    if doc_url_map:
+                        def replace_html(match):
+                            doc_name = match.group(1).strip()
+                            if doc_name in doc_url_map:
+                                return f'<a href="{doc_url_map[doc_name]}">{doc_name}</a>'
+                            return match.group(0)
+                        full_reply = re.sub(r'\[来源：([^\]]+)\]', replace_html, full_reply)
+
                     # ---------- 判断是否超长 ----------
-                    MAX_TEXT_LEN = 1200  # 保守阈值
+                    MAX_TEXT_LEN = 1200
                     if len(full_reply) <= MAX_TEXT_LEN:
-                        # 短消息：使用 Markdown 格式发送，支持 [文本](url) 链接
-                        if sources:
-                            # 构建文档名 → URL 映射
-                            doc_url_map = {}
-                            for s in sources:
-                                doc_name = s.get('file_name')
-                                url = s.get('url')
-                                if doc_name and url:
-                                    doc_url_map[doc_name] = url
-
-                            def replace_md(match):
-                                doc_name = match.group(1).strip()
-                                if doc_name in doc_url_map:
-                                    return f'[{doc_name}]({doc_url_map[doc_name]})'
-                                return match.group(0)
-
-                            full_reply = re.sub(r'\[来源：([^\]]+)\]', replace_html, full_reply)
-                            self.sender.send_text(from_user, full_reply)
-                        else:
-                            self.sender.send_text(from_user, full_reply)
+                        # 短消息：直接发送文本（企业微信文本消息支持 <a> 标签）
+                        self.sender.send_text(from_user, full_reply)
                     else:
-                        # 超长：存储到内存，生成详情页链接（详情页中可以使用 HTML 链接）
+                        # 超长：存储到内存，生成详情页链接
                         answer_id = str(uuid.uuid4())[:8]
-                        answer_store[answer_id] = full_reply  # 存储原始内容（含 [来源：...]）
+                        # 存储替换后的内容（含 <a> 标签）
+                        answer_store[answer_id] = full_reply
                         detail_url = f"https://{get_env_for_env('WECOM_CALLBACK_DOMAIN')}/answer/{answer_id}"
                         summary = full_reply[:200] + "...（点击下方链接查看完整内容）"
                         self.sender.send_news(

@@ -1,6 +1,5 @@
 # src/rag/retriever.py
 import os
-import urllib.parse
 from typing import List, Dict, Any, Tuple
 
 from qdrant_client import QdrantClient
@@ -36,13 +35,14 @@ def retrieve_context(
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     从 Qdrant 检索与查询相关的文档片段
-    返回: (拼接的上下文字符串, 来源列表，每个来源包含 file_name, url, chapter 等)
+    返回: (拼接的上下文字符串, 来源列表，每个来源包含 file_name, url, chunk_index)
     """
     client = _get_qdrant_client()
     model = _get_embedding_model()
 
     query_vector = model.encode(query).tolist()
 
+    # 兼容不同版本的 API
     try:
         results = client.query_points(
             collection_name=collection,
@@ -64,24 +64,54 @@ def retrieve_context(
     context_parts = []
     sources = []
 
+    # 构建文档名到 COS 预签名 URL 的映射（从索引中获取）
+    from src.knowledge.index import load_index
+    from src.utils.cos_api import CosAPI
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    index = load_index()
+    doc_name_to_url = {}
+    cos = CosAPI(
+        secret_id=os.getenv("COS_SECRET_ID"),
+        secret_key=os.getenv("COS_SECRET_KEY"),
+        region=os.getenv("COS_REGION", "ap-guangzhou"),
+        bucket=os.getenv("COS_BUCKET"),
+        use_internal=True
+    )
+
+    # 构建文档名到 URL 的映射
+    for key, meta in index.items():
+        file_name = meta.get("file_name", "")
+        if file_name:
+            try:
+                # 生成预签名 URL（用于详情页的链接）
+                presigned_url = cos.get_presigned_url(
+                    key,
+                    expires=3600,
+                    params={'response-content-disposition': 'inline'}
+                )
+                doc_name_to_url[file_name] = presigned_url
+            except Exception as e:
+                print(f"生成预签名 URL 失败 {file_name}: {e}")
+
     for idx, hit in enumerate(results, 1):
         payload = hit.payload
         text = payload.get("text", "")
         file_name = payload.get("file_name", "未知文档")
-        # 生成超链接（URL 编码文件名）
-        encoded_name = urllib.parse.quote(file_name)
-        doc_url = f"https://wecom.infohub.com.cn/docs/{encoded_name}"
-        # 尝试提取章节（如果有）
-        chapter = payload.get("chapter", "")
+        chunk_index = payload.get("chunk_index", 0)
 
         if text:
             context_parts.append(f"[{idx}] {text}")
+            
+            # 获取文档的 URL
+            doc_url = doc_name_to_url.get(file_name, "")
             sources.append({
                 "index": idx,
                 "file_name": file_name,
-                "chapter": chapter,
-                "url": doc_url,
-                "chunk_index": payload.get("chunk_index", 0)
+                "chunk_index": chunk_index,
+                "url": doc_url
             })
 
     return "\n\n".join(context_parts), sources
