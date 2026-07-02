@@ -1,8 +1,3 @@
-好的，我来整理完整的项目总结文档。这份文档将涵盖项目背景、架构设计、工程规范和目录结构，适合作为项目归档和交接文档。
-
----
-
-## 项目总结文档
 
 ```markdown
 # 数字化专家助手 - 项目总结文档
@@ -469,28 +464,3 @@ curl http://localhost:8006/health
 *本文档随项目代码一起维护，如有更新请同步修改。*
 ```
 
----
-
-## 保存到 Git
-
-```bash
-cd /opt/digital-expert
-cat > DOCUMENTATION.md << 'EOF'
-# 将上面的完整文档内容粘贴到这里
-EOF
-
-git add DOCUMENTATION.md
-git commit -m "docs: 添加项目总结文档"
-git push origin wedrive-sync
-
-# 合并到 main
-git checkout main
-git merge wedrive-sync
-git push origin main
-
-# 同步到生产
-cd /opt/digital-expert-pro
-git pull origin main
-```
-
-文档已完整整理，涵盖了项目背景、架构设计、工程规范和目录结构四大板块。你可以根据实际需要调整或补充。
